@@ -17,15 +17,38 @@ jobs:
       DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
       GAME_TITLE_ID: "01006F8002326000"
       GAME_VERSION: "v2228224"
-      INPUT_DIR: ${{ runner.temp }}/animal-crossing-input
-      WORK_DIR: ${{ runner.temp }}/animal-crossing-build
-      KEYS_FILE: ${{ runner.temp }}/prod.keys
-      IPA_FILE: ${{ runner.temp }}/AnimalCrossingNewHorizons.ipa
 
     steps:
+      # --------------------------------------------------
+      # 1. Checkout
+      # --------------------------------------------------
       - name: Checkout NXNative
         uses: actions/checkout@v4
 
+      # --------------------------------------------------
+      # 2. Prepare paths
+      # --------------------------------------------------
+      - name: Prepare folders
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "INPUT_DIR=$RUNNER_TEMP/animal-crossing-input" >> "$GITHUB_ENV"
+          echo "WORK_DIR=$RUNNER_TEMP/animal-crossing-build" >> "$GITHUB_ENV"
+          echo "KEYS_FILE=$RUNNER_TEMP/prod.keys" >> "$GITHUB_ENV"
+          echo "IPA_FILE=$RUNNER_TEMP/AnimalCrossingNewHorizons.ipa" >> "$GITHUB_ENV"
+          echo "OUTPUT_DIR=$RUNNER_TEMP/animal-crossing-output" >> "$GITHUB_ENV"
+
+          mkdir -p "$RUNNER_TEMP/animal-crossing-input"
+          mkdir -p "$RUNNER_TEMP/animal-crossing-build"
+          mkdir -p "$RUNNER_TEMP/animal-crossing-output"
+
+          echo "Folders prepared"
+          df -h
+
+      # --------------------------------------------------
+      # 3. Free disk space
+      # --------------------------------------------------
       - name: Free disk space
         shell: bash
         run: |
@@ -39,34 +62,46 @@ jobs:
           sudo rm -rf \
             /Library/Developer/CoreSimulator/Volumes/iOS_* \
             /Library/Developer/CoreSimulator/Caches \
-            ~/Library/Developer/Xcode/DerivedData \
-            ~/Library/Developer/Xcode/Archives \
-            ~/Library/Android \
+            "$HOME/Library/Developer/Xcode/DerivedData" \
+            "$HOME/Library/Developer/Xcode/Archives" \
+            "$HOME/Library/Android" \
             /usr/local/share/powershell \
             /usr/share/dotnet \
             || true
 
           brew cleanup -s || true
-          rm -rf ~/.cache/pip ~/.npm || true
+          rm -rf "$HOME/.cache/pip" "$HOME/.npm" || true
 
           echo "Disk after cleanup:"
           df -h
 
+      # --------------------------------------------------
+      # 4. Python
+      # --------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # --------------------------------------------------
+      # 5. Xcode and Metal
+      # --------------------------------------------------
       - name: Check Xcode and install Metal Toolchain
         shell: bash
         run: |
           set -euo pipefail
 
-          xcodebuild -version
-          xcodebuild -downloadComponent MetalToolchain
+          echo "Developer directory:"
+          echo "$DEVELOPER_DIR"
 
+          xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
 
+          xcodebuild -downloadComponent MetalToolchain
+
+      # --------------------------------------------------
+      # 6. NXNative dependencies
+      # --------------------------------------------------
       - name: Install NXNative dependencies
         shell: bash
         run: |
@@ -75,33 +110,35 @@ jobs:
           brew install xcodegen zstd glslang
 
           python3 -m pip install --upgrade pip
+
           python3 -m pip install \
             lz4 \
             "capstone>=5,<6" \
             fonttools \
-            nsz \
             zbic \
             "backports.zstd; python_version < '3.14'"
 
-          python3 -c "import lz4, capstone, fontTools, zbic; print('Python dependencies OK')"
+          python3 - <<'PY'
+          import lz4
+          import capstone
+          import fontTools
+          import zbic
 
+          print("NXNative Python dependencies OK")
+          PY
+
+      # --------------------------------------------------
+      # 7. Google Drive downloader
+      # --------------------------------------------------
       - name: Install Google Drive downloader
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install gdown
 
-      - name: Prepare folders
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$INPUT_DIR"
-          mkdir -p "$WORK_DIR"
-
-          echo "Input: $INPUT_DIR"
-          echo "Build: $WORK_DIR"
-
+      # --------------------------------------------------
+      # 8. Download Base NSP
+      # --------------------------------------------------
       - name: Download Animal Crossing Base NSP
         shell: bash
         run: |
@@ -111,18 +148,23 @@ jobs:
           OUTPUT="$INPUT_DIR/AnimalCrossing_Base.nsp"
 
           for attempt in 1 2 3; do
-            if gdown "$URL" -O "$OUTPUT"; then
+            if gdown --fuzzy "$URL" -O "$OUTPUT"; then
               break
             fi
+
             rm -f "$OUTPUT"
             echo "Base download attempt $attempt failed"
             sleep 5
           done
 
           test -s "$OUTPUT"
-          echo "Base NSP downloaded"
+
+          echo "Base NSP downloaded:"
           ls -lh "$OUTPUT"
 
+      # --------------------------------------------------
+      # 9. Download Update NSP
+      # --------------------------------------------------
       - name: Download Animal Crossing Update 3.0.3 NSP
         shell: bash
         run: |
@@ -132,18 +174,23 @@ jobs:
           OUTPUT="$INPUT_DIR/AnimalCrossing_Update_3.0.3.nsp"
 
           for attempt in 1 2 3; do
-            if gdown "$URL" -O "$OUTPUT"; then
+            if gdown --fuzzy "$URL" -O "$OUTPUT"; then
               break
             fi
+
             rm -f "$OUTPUT"
             echo "Update download attempt $attempt failed"
             sleep 5
           done
 
           test -s "$OUTPUT"
-          echo "Update NSP downloaded"
+
+          echo "Update NSP downloaded:"
           ls -lh "$OUTPUT"
 
+      # --------------------------------------------------
+      # 10. Download prod.keys
+      # --------------------------------------------------
       - name: Download prod.keys
         shell: bash
         run: |
@@ -152,9 +199,10 @@ jobs:
           URL="https://drive.google.com/uc?id=1DCVsXGpTGvo8NpcsjlrEfGlmWRCNW7WQ"
 
           for attempt in 1 2 3; do
-            if gdown "$URL" -O "$KEYS_FILE"; then
+            if gdown --fuzzy "$URL" -O "$KEYS_FILE"; then
               break
             fi
+
             rm -f "$KEYS_FILE"
             echo "Keys download attempt $attempt failed"
             sleep 5
@@ -165,28 +213,55 @@ jobs:
 
           echo "prod.keys downloaded successfully"
 
+      # --------------------------------------------------
+      # 11. Validate downloaded files
+      # --------------------------------------------------
       - name: Validate input files
         shell: bash
         run: |
           set -euo pipefail
 
-          test -s "$INPUT_DIR/AnimalCrossing_Base.nsp"
-          test -s "$INPUT_DIR/AnimalCrossing_Update_3.0.3.nsp"
+          BASE="$INPUT_DIR/AnimalCrossing_Base.nsp"
+          UPDATE="$INPUT_DIR/AnimalCrossing_Update_3.0.3.nsp"
+
+          test -s "$BASE"
+          test -s "$UPDATE"
           test -s "$KEYS_FILE"
 
-          echo "Input files:"
-          ls -lh "$INPUT_DIR"
+          python3 - "$BASE" "$UPDATE" <<'PY'
+          import sys
+          from pathlib import Path
 
-          echo "Available disk space:"
-          df -h
+          for name in sys.argv[1:]:
+              path = Path(name)
 
-          echo "Checking that only Base and Update NSPs are present..."
+              with path.open("rb") as f:
+                  magic = f.read(4)
+
+              if magic != b"PFS0":
+                  raise SystemExit(
+                      f"Invalid NSP container or incomplete download: {path.name}"
+                  )
+
+              print(f"NSP container OK: {path.name} ({path.stat().st_size:,} bytes)")
+          PY
+
           NSP_COUNT=$(find "$INPUT_DIR" -maxdepth 1 -type f \
             \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" -o -iname "*.xcz" \) \
             | wc -l | tr -d ' ')
 
-          test "$NSP_COUNT" -eq 2
+          if [ "$NSP_COUNT" -ne 2 ]; then
+            echo "Expected exactly 2 game containers, found $NSP_COUNT"
+            exit 1
+          fi
 
+          echo "Base + Update only. No DLC container."
+          echo "Available disk:"
+          df -h
+
+      # --------------------------------------------------
+      # 12. Build IPA + separate RomFS directly from NSP
+      # --------------------------------------------------
       - name: Build Animal Crossing IPA and separate RomFS
         shell: bash
         run: |
@@ -203,46 +278,71 @@ jobs:
             --keep-extracted \
             --progress lines
 
-      - name: Validate build outputs
+      # --------------------------------------------------
+      # 13. Collect outputs
+      # --------------------------------------------------
+      - name: Collect build outputs
         if: always()
         shell: bash
         run: |
-          set -euo pipefail
+          set -u
+
+          mkdir -p "$OUTPUT_DIR"
 
           echo "Checking IPA..."
+
           if [ -s "$IPA_FILE" ]; then
-            ls -lh "$IPA_FILE"
+            cp "$IPA_FILE" "$OUTPUT_DIR/AnimalCrossingNewHorizons.ipa"
+            ls -lh "$OUTPUT_DIR/AnimalCrossingNewHorizons.ipa"
           else
-            echo "IPA not found"
+            echo "IPA not available"
           fi
 
-          echo "Checking extracted RomFS..."
-          ROMFS_FILE="$WORK_DIR/extract/$GAME_VERSION/RomFS.img"
+          echo "Searching for RomFS..."
 
-          if [ -s "$ROMFS_FILE" ]; then
-            ls -lh "$ROMFS_FILE"
-            echo "RomFS image exists"
+          if [ -d "$WORK_DIR/extract" ]; then
+            ROMFS_FILE=$(find "$WORK_DIR/extract" \
+              -type f \
+              -name "RomFS.img" \
+              -print -quit)
+
+            if [ -n "$ROMFS_FILE" ] && [ -s "$ROMFS_FILE" ]; then
+              cp "$ROMFS_FILE" "$OUTPUT_DIR/RomFS.img"
+              echo "RomFS collected:"
+              ls -lh "$OUTPUT_DIR/RomFS.img"
+            else
+              echo "RomFS.img not found"
+            fi
           else
-            echo "RomFS image not found at expected path"
-            find "$WORK_DIR/extract" -maxdepth 3 -type f -name "RomFS.img" -print || true
+            echo "Extract directory not found"
           fi
 
-          echo "Build logs:"
-          find "$WORK_DIR/logs" -maxdepth 2 -type f -print 2>/dev/null || true
+          echo "Collecting logs..."
 
-      - name: Upload IPA and RomFS
+          if [ -d "$WORK_DIR/logs" ]; then
+            mkdir -p "$OUTPUT_DIR/logs"
+            cp -R "$WORK_DIR/logs/." "$OUTPUT_DIR/logs/" || true
+          fi
+
+          echo "Available output files:"
+          find "$OUTPUT_DIR" -maxdepth 3 -type f -print
+
+      # --------------------------------------------------
+      # 14. Upload IPA + RomFS + logs
+      # --------------------------------------------------
+      - name: Upload Animal Crossing build artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: AnimalCrossing-NXNative-iOS
-          path: |
-            ${{ runner.temp }}/AnimalCrossingNewHorizons.ipa
-            ${{ runner.temp }}/animal-crossing-build/extract/v2228224/RomFS.img
-            ${{ runner.temp }}/animal-crossing-build/logs/
+          path: ${{ runner.temp }}/animal-crossing-output/
           compression-level: 0
           retention-days: 7
           if-no-files-found: warn
 
+      # --------------------------------------------------
+      # 15. Cleanup sensitive files
+      # --------------------------------------------------
       - name: Cleanup sensitive files
         if: always()
         shell: bash
@@ -250,9 +350,10 @@ jobs:
           set +e
 
           rm -f "$KEYS_FILE"
+
           rm -f "$INPUT_DIR"/*.nsp
           rm -f "$INPUT_DIR"/*.nsz
           rm -f "$INPUT_DIR"/*.xci
           rm -f "$INPUT_DIR"/*.xcz
 
-          echo "Sensitive input files cleaned up"
+          echo "prod.keys and NSP files cleaned up"

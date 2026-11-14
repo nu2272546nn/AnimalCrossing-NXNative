@@ -1,0 +1,258 @@
+
+name: Animal Crossing New Horizons - Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      GAME_TITLE_ID: "01006F8002326000"
+      GAME_VERSION: "v2228224"
+      INPUT_DIR: ${{ runner.temp }}/animal-crossing-input
+      WORK_DIR: ${{ runner.temp }}/animal-crossing-build
+      KEYS_FILE: ${{ runner.temp }}/prod.keys
+      IPA_FILE: ${{ runner.temp }}/AnimalCrossingNewHorizons.ipa
+
+    steps:
+      - name: Checkout NXNative
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Disk before cleanup:"
+          df -h
+
+          xcrun simctl delete unavailable || true
+
+          sudo rm -rf \
+            /Library/Developer/CoreSimulator/Volumes/iOS_* \
+            /Library/Developer/CoreSimulator/Caches \
+            ~/Library/Developer/Xcode/DerivedData \
+            ~/Library/Developer/Xcode/Archives \
+            ~/Library/Android \
+            /usr/local/share/powershell \
+            /usr/share/dotnet \
+            || true
+
+          brew cleanup -s || true
+          rm -rf ~/.cache/pip ~/.npm || true
+
+          echo "Disk after cleanup:"
+          df -h
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check Xcode and install Metal Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild -version
+          xcodebuild -downloadComponent MetalToolchain
+
+          xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Install NXNative dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install xcodegen zstd glslang
+
+          python3 -m pip install --upgrade pip
+          python3 -m pip install \
+            lz4 \
+            "capstone>=5,<6" \
+            fonttools \
+            nsz \
+            zbic \
+            "backports.zstd; python_version < '3.14'"
+
+          python3 -c "import lz4, capstone, fontTools, zbic; print('Python dependencies OK')"
+
+      - name: Install Google Drive downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m pip install gdown
+
+      - name: Prepare folders
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$INPUT_DIR"
+          mkdir -p "$WORK_DIR"
+
+          echo "Input: $INPUT_DIR"
+          echo "Build: $WORK_DIR"
+
+      - name: Download Animal Crossing Base NSP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://drive.google.com/uc?id=1MEt3kilLWTZflqGpqnUa1eehWtDxOCpS"
+          OUTPUT="$INPUT_DIR/AnimalCrossing_Base.nsp"
+
+          for attempt in 1 2 3; do
+            if gdown "$URL" -O "$OUTPUT"; then
+              break
+            fi
+            rm -f "$OUTPUT"
+            echo "Base download attempt $attempt failed"
+            sleep 5
+          done
+
+          test -s "$OUTPUT"
+          echo "Base NSP downloaded"
+          ls -lh "$OUTPUT"
+
+      - name: Download Animal Crossing Update 3.0.3 NSP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://drive.google.com/uc?id=1aBtoEnV0w259-x8ijFY4tKQSxE9aACjd"
+          OUTPUT="$INPUT_DIR/AnimalCrossing_Update_3.0.3.nsp"
+
+          for attempt in 1 2 3; do
+            if gdown "$URL" -O "$OUTPUT"; then
+              break
+            fi
+            rm -f "$OUTPUT"
+            echo "Update download attempt $attempt failed"
+            sleep 5
+          done
+
+          test -s "$OUTPUT"
+          echo "Update NSP downloaded"
+          ls -lh "$OUTPUT"
+
+      - name: Download prod.keys
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          URL="https://drive.google.com/uc?id=1DCVsXGpTGvo8NpcsjlrEfGlmWRCNW7WQ"
+
+          for attempt in 1 2 3; do
+            if gdown "$URL" -O "$KEYS_FILE"; then
+              break
+            fi
+            rm -f "$KEYS_FILE"
+            echo "Keys download attempt $attempt failed"
+            sleep 5
+          done
+
+          test -s "$KEYS_FILE"
+          chmod 600 "$KEYS_FILE"
+
+          echo "prod.keys downloaded successfully"
+
+      - name: Validate input files
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          test -s "$INPUT_DIR/AnimalCrossing_Base.nsp"
+          test -s "$INPUT_DIR/AnimalCrossing_Update_3.0.3.nsp"
+          test -s "$KEYS_FILE"
+
+          echo "Input files:"
+          ls -lh "$INPUT_DIR"
+
+          echo "Available disk space:"
+          df -h
+
+          echo "Checking that only Base and Update NSPs are present..."
+          NSP_COUNT=$(find "$INPUT_DIR" -maxdepth 1 -type f \
+            \( -iname "*.nsp" -o -iname "*.nsz" -o -iname "*.xci" -o -iname "*.xcz" \) \
+            | wc -l | tr -d ' ')
+
+          test "$NSP_COUNT" -eq 2
+
+      - name: Build Animal Crossing IPA and separate RomFS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 scripts/build_ipa_from_nsp.py \
+            "$INPUT_DIR" \
+            -k "$KEYS_FILE" \
+            --title-id "$GAME_TITLE_ID" \
+            --package "$GAME_VERSION" \
+            --work-dir "$WORK_DIR" \
+            -o "$IPA_FILE" \
+            --romfs separate \
+            --keep-extracted \
+            --progress lines
+
+      - name: Validate build outputs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking IPA..."
+          if [ -s "$IPA_FILE" ]; then
+            ls -lh "$IPA_FILE"
+          else
+            echo "IPA not found"
+          fi
+
+          echo "Checking extracted RomFS..."
+          ROMFS_FILE="$WORK_DIR/extract/$GAME_VERSION/RomFS.img"
+
+          if [ -s "$ROMFS_FILE" ]; then
+            ls -lh "$ROMFS_FILE"
+            echo "RomFS image exists"
+          else
+            echo "RomFS image not found at expected path"
+            find "$WORK_DIR/extract" -maxdepth 3 -type f -name "RomFS.img" -print || true
+          fi
+
+          echo "Build logs:"
+          find "$WORK_DIR/logs" -maxdepth 2 -type f -print 2>/dev/null || true
+
+      - name: Upload IPA and RomFS
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AnimalCrossing-NXNative-iOS
+          path: |
+            ${{ runner.temp }}/AnimalCrossingNewHorizons.ipa
+            ${{ runner.temp }}/animal-crossing-build/extract/v2228224/RomFS.img
+            ${{ runner.temp }}/animal-crossing-build/logs/
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: warn
+
+      - name: Cleanup sensitive files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          rm -f "$KEYS_FILE"
+          rm -f "$INPUT_DIR"/*.nsp
+          rm -f "$INPUT_DIR"/*.nsz
+          rm -f "$INPUT_DIR"/*.xci
+          rm -f "$INPUT_DIR"/*.xcz
+
+          echo "Sensitive input files cleaned up"

@@ -19,15 +19,11 @@ jobs:
       GAME_VERSION: "v2228224"
 
     steps:
-      # --------------------------------------------------
       # 1. Checkout
-      # --------------------------------------------------
       - name: Checkout NXNative
         uses: actions/checkout@v4
 
-      # --------------------------------------------------
       # 2. Prepare paths
-      # --------------------------------------------------
       - name: Prepare folders
         shell: bash
         run: |
@@ -46,9 +42,7 @@ jobs:
           echo "Folders prepared"
           df -h
 
-      # --------------------------------------------------
       # 3. Free disk space
-      # --------------------------------------------------
       - name: Free disk space
         shell: bash
         run: |
@@ -75,17 +69,13 @@ jobs:
           echo "Disk after cleanup:"
           df -h
 
-      # --------------------------------------------------
       # 4. Python
-      # --------------------------------------------------
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
-      # --------------------------------------------------
       # 5. Xcode and Metal
-      # --------------------------------------------------
       - name: Check Xcode and install Metal Toolchain
         shell: bash
         run: |
@@ -99,9 +89,7 @@ jobs:
 
           xcodebuild -downloadComponent MetalToolchain
 
-      # --------------------------------------------------
       # 6. NXNative dependencies
-      # --------------------------------------------------
       - name: Install NXNative dependencies
         shell: bash
         run: |
@@ -127,18 +115,15 @@ jobs:
           print("NXNative Python dependencies OK")
           PY
 
-      # --------------------------------------------------
       # 7. Google Drive downloader
-      # --------------------------------------------------
       - name: Install Google Drive downloader
         shell: bash
         run: |
           set -euo pipefail
-          python3 -m pip install gdown
+          python3 -m pip install --upgrade gdown
+          gdown --version
 
-      # --------------------------------------------------
       # 8. Download Base NSP
-      # --------------------------------------------------
       - name: Download Animal Crossing Base NSP
         shell: bash
         run: |
@@ -147,9 +132,14 @@ jobs:
           URL="https://drive.google.com/uc?id=1MEt3kilLWTZflqGpqnUa1eehWtDxOCpS"
           OUTPUT="$INPUT_DIR/AnimalCrossing_Base.nsp"
 
+          DOWNLOADED=false
+
           for attempt in 1 2 3; do
-            if gdown --fuzzy "$URL" -O "$OUTPUT"; then
-              break
+            if gdown "$URL" -O "$OUTPUT"; then
+              if [ -s "$OUTPUT" ]; then
+                DOWNLOADED=true
+                break
+              fi
             fi
 
             rm -f "$OUTPUT"
@@ -157,14 +147,15 @@ jobs:
             sleep 5
           done
 
-          test -s "$OUTPUT"
+          if [ "$DOWNLOADED" != "true" ]; then
+            echo "Base NSP download failed"
+            exit 1
+          fi
 
           echo "Base NSP downloaded:"
           ls -lh "$OUTPUT"
 
-      # --------------------------------------------------
       # 9. Download Update NSP
-      # --------------------------------------------------
       - name: Download Animal Crossing Update 3.0.3 NSP
         shell: bash
         run: |
@@ -173,9 +164,14 @@ jobs:
           URL="https://drive.google.com/uc?id=1aBtoEnV0w259-x8ijFY4tKQSxE9aACjd"
           OUTPUT="$INPUT_DIR/AnimalCrossing_Update_3.0.3.nsp"
 
+          DOWNLOADED=false
+
           for attempt in 1 2 3; do
-            if gdown --fuzzy "$URL" -O "$OUTPUT"; then
-              break
+            if gdown "$URL" -O "$OUTPUT"; then
+              if [ -s "$OUTPUT" ]; then
+                DOWNLOADED=true
+                break
+              fi
             fi
 
             rm -f "$OUTPUT"
@@ -183,14 +179,15 @@ jobs:
             sleep 5
           done
 
-          test -s "$OUTPUT"
+          if [ "$DOWNLOADED" != "true" ]; then
+            echo "Update NSP download failed"
+            exit 1
+          fi
 
           echo "Update NSP downloaded:"
           ls -lh "$OUTPUT"
 
-      # --------------------------------------------------
       # 10. Download prod.keys
-      # --------------------------------------------------
       - name: Download prod.keys
         shell: bash
         run: |
@@ -198,9 +195,14 @@ jobs:
 
           URL="https://drive.google.com/uc?id=1DCVsXGpTGvo8NpcsjlrEfGlmWRCNW7WQ"
 
+          DOWNLOADED=false
+
           for attempt in 1 2 3; do
-            if gdown --fuzzy "$URL" -O "$KEYS_FILE"; then
-              break
+            if gdown "$URL" -O "$KEYS_FILE"; then
+              if [ -s "$KEYS_FILE" ]; then
+                DOWNLOADED=true
+                break
+              fi
             fi
 
             rm -f "$KEYS_FILE"
@@ -208,14 +210,15 @@ jobs:
             sleep 5
           done
 
-          test -s "$KEYS_FILE"
-          chmod 600 "$KEYS_FILE"
+          if [ "$DOWNLOADED" != "true" ]; then
+            echo "prod.keys download failed"
+            exit 1
+          fi
 
+          chmod 600 "$KEYS_FILE"
           echo "prod.keys downloaded successfully"
 
-      # --------------------------------------------------
       # 11. Validate downloaded files
-      # --------------------------------------------------
       - name: Validate input files
         shell: bash
         run: |
@@ -243,7 +246,10 @@ jobs:
                       f"Invalid NSP container or incomplete download: {path.name}"
                   )
 
-              print(f"NSP container OK: {path.name} ({path.stat().st_size:,} bytes)")
+              print(
+                  f"NSP container OK: {path.name} "
+                  f"({path.stat().st_size:,} bytes)"
+              )
           PY
 
           NSP_COUNT=$(find "$INPUT_DIR" -maxdepth 1 -type f \
@@ -259,9 +265,7 @@ jobs:
           echo "Available disk:"
           df -h
 
-      # --------------------------------------------------
       # 12. Build IPA + separate RomFS directly from NSP
-      # --------------------------------------------------
       - name: Build Animal Crossing IPA and separate RomFS
         shell: bash
         run: |
@@ -278,9 +282,7 @@ jobs:
             --keep-extracted \
             --progress lines
 
-      # --------------------------------------------------
       # 13. Collect outputs
-      # --------------------------------------------------
       - name: Collect build outputs
         if: always()
         shell: bash
@@ -327,9 +329,7 @@ jobs:
           echo "Available output files:"
           find "$OUTPUT_DIR" -maxdepth 3 -type f -print
 
-      # --------------------------------------------------
       # 14. Upload IPA + RomFS + logs
-      # --------------------------------------------------
       - name: Upload Animal Crossing build artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -340,9 +340,7 @@ jobs:
           retention-days: 7
           if-no-files-found: warn
 
-      # --------------------------------------------------
       # 15. Cleanup sensitive files
-      # --------------------------------------------------
       - name: Cleanup sensitive files
         if: always()
         shell: bash

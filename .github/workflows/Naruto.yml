@@ -1,0 +1,289 @@
+
+name: Naruto Storm 4 Road to Boruto - Build iOS IPA
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 360
+
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_27.2.app/Contents/Developer
+      GAME_TITLE_ID: "01003F800CF5C000"
+      GAME_VERSION: "v0"
+      GAME_NAME: "NarutoStorm4"
+
+    steps:
+      # 1. Checkout
+      - name: Checkout NXNative
+        uses: actions/checkout@v4
+
+      # 2. Prepare paths
+      - name: Prepare folders
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "INPUT_DIR=$RUNNER_TEMP/naruto-input" >> "$GITHUB_ENV"
+          echo "WORK_DIR=$RUNNER_TEMP/naruto-build" >> "$GITHUB_ENV"
+          echo "KEYS_FILE=$RUNNER_TEMP/prod.keys" >> "$GITHUB_ENV"
+          echo "IPA_FILE=$RUNNER_TEMP/NarutoStorm4.ipa" >> "$GITHUB_ENV"
+          echo "OUTPUT_DIR=$RUNNER_TEMP/naruto-output" >> "$GITHUB_ENV"
+
+          mkdir -p "$RUNNER_TEMP/naruto-input"
+          mkdir -p "$RUNNER_TEMP/naruto-build"
+          mkdir -p "$RUNNER_TEMP/naruto-output"
+
+          df -h
+
+      # 3. Free disk space
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcrun simctl delete unavailable || true
+
+          sudo rm -rf \
+            /Library/Developer/CoreSimulator/Volumes/iOS_* \
+            /Library/Developer/CoreSimulator/Caches \
+            "$HOME/Library/Developer/Xcode/DerivedData" \
+            "$HOME/Library/Developer/Xcode/Archives" \
+            "$HOME/Library/Android" \
+            /usr/local/share/powershell \
+            /usr/share/dotnet \
+            || true
+
+          brew cleanup -s || true
+          rm -rf "$HOME/.cache/pip" "$HOME/.npm" || true
+
+          df -h
+
+      # 4. Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 5. Xcode and Metal
+      - name: Check Xcode and install Metal Toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+
+          xcodebuild -downloadComponent MetalToolchain
+
+      # 6. NXNative dependencies
+      - name: Install NXNative dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          brew install xcodegen zstd glslang
+
+          python3 -m pip install --upgrade pip
+
+          python3 -m pip install \
+            lz4 \
+            "capstone>=5,<6" \
+            fonttools \
+            zbic \
+            "backports.zstd; python_version < '3.14'"
+
+          python3 - <<'PY'
+          import lz4
+          import capstone
+          import fontTools
+          import zbic
+          print("NXNative dependencies OK")
+          PY
+
+      # 7. Google Drive downloader
+      - name: Install Google Drive downloader
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 -m pip install --upgrade gdown
+          gdown --version
+
+      # 8. Download Base NSP
+      - name: Download Naruto Storm 4 Base NSP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE_FILE_ID="1axB1GqjfoXcF4kZ9qhv1o5cnfAu2O7UG"
+          URL="https://drive.google.com/uc?id=$BASE_FILE_ID"
+          OUTPUT="$INPUT_DIR/NarutoStorm4_Base.nsp"
+
+          gdown "$URL" -O "$OUTPUT"
+
+          test -s "$OUTPUT"
+
+          echo "Base NSP downloaded:"
+          ls -lh "$OUTPUT"
+
+      # 9. Download prod.keys
+      - name: Download prod.keys
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          KEYS_FILE_ID="1DCVsXGpTGvo8NpcsjlrEfGlmWRCNW7WQ"
+          URL="https://drive.google.com/uc?id=$KEYS_FILE_ID"
+
+          gdown "$URL" -O "$KEYS_FILE"
+
+          test -s "$KEYS_FILE"
+          chmod 600 "$KEYS_FILE"
+
+          echo "prod.keys downloaded"
+
+      # 10. Validate NSP container
+      - name: Validate Naruto Storm 4 NSP
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          BASE="$INPUT_DIR/NarutoStorm4_Base.nsp"
+
+          test -s "$BASE"
+          test -s "$KEYS_FILE"
+
+          python3 - "$BASE" <<'PY'
+          import sys
+          from pathlib import Path
+
+          path = Path(sys.argv[1])
+
+          with path.open("rb") as f:
+              magic = f.read(4)
+
+          if magic != b"PFS0":
+              raise SystemExit("Invalid NSP container")
+
+          print(f"NSP container OK: {path.stat().st_size:,} bytes")
+          PY
+
+          echo "Selected package: v0 (Base Game)"
+          echo "Title ID: 01003F800CF5C000"
+          echo "No Update / No Separate DLC"
+
+          df -h
+
+      # 11. Build IPA and separate RomFS
+      - name: Build Naruto Storm 4 IPA and RomFS
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python3 scripts/build_ipa_from_nsp.py \
+            "$INPUT_DIR" \
+            -k "$KEYS_FILE" \
+            --title-id "$GAME_TITLE_ID" \
+            --package "$GAME_VERSION" \
+            --work-dir "$WORK_DIR" \
+            -o "$IPA_FILE" \
+            --platform ios \
+            --romfs separate \
+            --keep-extracted \
+            --progress lines
+
+          test -s "$IPA_FILE"
+
+      # 12. Collect outputs
+      - name: Collect Naruto Storm 4 outputs
+        if: always()
+        shell: bash
+        run: |
+          set -u
+
+          mkdir -p "$OUTPUT_DIR"
+
+          # IPA
+          if [ -s "$IPA_FILE" ]; then
+            cp "$IPA_FILE" "$OUTPUT_DIR/NarutoStorm4.ipa"
+          fi
+
+          # Find extracted RomFS image
+          if [ -d "$WORK_DIR/extract" ]; then
+
+            ROMFS_FILE=$(find "$WORK_DIR/extract" \
+              -type f \
+              -name "RomFS.img" \
+              -print -quit)
+
+            if [ -n "$ROMFS_FILE" ] && [ -s "$ROMFS_FILE" ]; then
+              cp "$ROMFS_FILE" "$OUTPUT_DIR/RomFS.img"
+            else
+
+              # If extraction contains a RomFS directory,
+              # pack it into a single RomFS image.
+              ROMFS_DIR=$(find "$WORK_DIR/extract" \
+                -type d \
+                -name "RomFS" \
+                -print -quit)
+
+              if [ -n "$ROMFS_DIR" ]; then
+                python3 dm/tools/romfs_image.py \
+                  "$ROMFS_DIR" \
+                  "$OUTPUT_DIR/RomFS.img"
+              fi
+            fi
+          fi
+
+          # Build logs
+          if [ -d "$WORK_DIR/logs" ]; then
+            mkdir -p "$OUTPUT_DIR/logs"
+            cp -R "$WORK_DIR/logs/." "$OUTPUT_DIR/logs/" || true
+          fi
+
+          # Provisional profile
+          if [ -d "$WORK_DIR/profile" ]; then
+            mkdir -p "$OUTPUT_DIR/profile"
+            cp -R "$WORK_DIR/profile/." "$OUTPUT_DIR/profile/" || true
+          fi
+
+          # Survey report
+          if [ -d "$INPUT_DIR/${GAME_TITLE_ID}_survey" ]; then
+            cp -R "$INPUT_DIR/${GAME_TITLE_ID}_survey" \
+              "$OUTPUT_DIR/survey"
+          fi
+
+          echo "Collected files:"
+          find "$OUTPUT_DIR" -maxdepth 4 -type f -print
+
+          df -h
+
+      # 13. Upload artifacts
+      - name: Upload Naruto Storm 4 artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: NarutoStorm4-NXNative-iOS
+          path: ${{ runner.temp }}/naruto-output/
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: warn
+
+      # 14. Cleanup
+      - name: Cleanup sensitive files
+        if: always()
+        shell: bash
+        run: |
+          set +e
+
+          rm -f "$KEYS_FILE"
+          rm -f "$INPUT_DIR"/*.nsp
+
+          echo "Cleanup completed"

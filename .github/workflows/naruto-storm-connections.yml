@@ -20,45 +20,105 @@ jobs:
       GAME_NAME: "NarutoStormConnections"
 
     steps:
+      # 1. Checkout repository
       - name: Checkout NXNative
         uses: actions/checkout@v4
 
+      # 2. Prepare working directories
       - name: Prepare folders
         shell: bash
         run: |
           set -euo pipefail
+
           echo "INPUT_DIR=$RUNNER_TEMP/naruto-input" >> "$GITHUB_ENV"
           echo "WORK_DIR=$RUNNER_TEMP/naruto-build" >> "$GITHUB_ENV"
           echo "KEYS_FILE=$RUNNER_TEMP/prod.keys" >> "$GITHUB_ENV"
           echo "IPA_FILE=$RUNNER_TEMP/NarutoStormConnections.ipa" >> "$GITHUB_ENV"
           echo "OUTPUT_DIR=$RUNNER_TEMP/naruto-output" >> "$GITHUB_ENV"
 
-          mkdir -p "$RUNNER_TEMP/naruto-input"
-          mkdir -p "$RUNNER_TEMP/naruto-build"
-          mkdir -p "$RUNNER_TEMP/naruto-output"
+          mkdir -p \
+            "$RUNNER_TEMP/naruto-input" \
+            "$RUNNER_TEMP/naruto-build" \
+            "$RUNNER_TEMP/naruto-output"
 
+          echo "Initial disk space:"
           df -h
 
+      # 3. Verify Xcode and Apple SDK
       - name: Check Xcode and disk
         shell: bash
         run: |
           set -euo pipefail
+
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
           xcrun -f metal
+
+          echo "Disk status:"
           df -h
 
+      # 4. Free disk space BEFORE downloading the game
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "===== BEFORE CLEANUP ====="
+          df -h "$RUNNER_TEMP"
+
+          # Remove unavailable simulator runtimes
+          xcrun simctl delete unavailable || true
+
+          # Remove unnecessary Xcode caches
+          sudo rm -rf \
+            /Library/Developer/CoreSimulator/Caches \
+            "$HOME/Library/Developer/Xcode/DerivedData" \
+            "$HOME/Library/Developer/Xcode/Archives" \
+            || true
+
+          # Remove unused Android and development SDK files
+          sudo rm -rf \
+            "$HOME/Library/Android" \
+            /usr/local/share/powershell \
+            /usr/share/dotnet \
+            || true
+
+          # Clear package caches
+          brew cleanup -s || true
+          rm -rf \
+            "$HOME/.cache/pip" \
+            "$HOME/.npm" \
+            || true
+
+          echo "===== AFTER CLEANUP ====="
+          df -h "$RUNNER_TEMP"
+
+          AVAILABLE_KB=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+
+          echo "Available disk: ${AVAILABLE_GB} GiB"
+
+          if [ "$AVAILABLE_GB" -lt 25 ]; then
+            echo "::error::Insufficient disk space. Need at least 25 GiB before downloading the game."
+            exit 1
+          fi
+
+      # 5. Install Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
+      # 6. Install build dependencies
       - name: Install dependencies
         shell: bash
         run: |
           set -euo pipefail
+
           brew install xcodegen zstd glslang
+
           python3 -m pip install --upgrade pip
+
           python3 -m pip install \
             lz4 \
             "capstone>=5,<6" \
@@ -66,12 +126,14 @@ jobs:
             zbic \
             "backports.zstd; python_version < '3.14'"
 
+      # 7. Install Google Drive downloader
       - name: Install Google Drive downloader
         shell: bash
         run: |
           set -euo pipefail
           python3 -m pip install --upgrade gdown
 
+      # 8. Download Naruto Storm Connections NSP
       - name: Download game NSP
         shell: bash
         env:
@@ -80,15 +142,21 @@ jobs:
           set -euo pipefail
 
           if [ -z "$NSP_URL" ]; then
-            echo "Missing NARUTO_STORM_CONNECTIONS_NSP_URL secret"
+            echo "::error::Missing NARUTO_STORM_CONNECTIONS_NSP_URL"
             exit 1
           fi
 
-          gdown "$NSP_URL" \
+          gdown --fuzzy "$NSP_URL" \
             -O "$INPUT_DIR/NarutoStormConnections.nsp"
 
           test -s "$INPUT_DIR/NarutoStormConnections.nsp"
 
+          echo "NSP downloaded:"
+          ls -lh "$INPUT_DIR/NarutoStormConnections.nsp"
+
+          df -h "$RUNNER_TEMP"
+
+      # 9. Download prod.keys
       - name: Download prod.keys
         shell: bash
         env:
@@ -97,14 +165,18 @@ jobs:
           set -euo pipefail
 
           if [ -z "$KEYS_URL" ]; then
-            echo "Missing NX_PROD_KEYS_URL secret"
+            echo "::error::Missing NX_PROD_KEYS_URL"
             exit 1
           fi
 
-          gdown "$KEYS_URL" -O "$KEYS_FILE"
+          gdown --fuzzy "$KEYS_URL" -O "$KEYS_FILE"
+
           test -s "$KEYS_FILE"
           chmod 600 "$KEYS_FILE"
 
+          echo "prod.keys downloaded successfully"
+
+      # 10. Validate NSP
       - name: Validate NSP
         shell: bash
         run: |
@@ -114,31 +186,36 @@ jobs:
           import sys
           from pathlib import Path
 
-          p = Path(sys.argv[1])
-          with p.open("rb") as f:
+          path = Path(sys.argv[1])
+
+          with path.open("rb") as f:
               magic = f.read(4)
 
           if magic != b"PFS0":
-              raise SystemExit("Invalid NSP container")
+              raise SystemExit("Invalid NSP: PFS0 header not found")
 
-          print(f"NSP OK: {p.stat().st_size:,} bytes")
+          print(f"NSP validation passed: {path.stat().st_size:,} bytes")
           PY
 
-      - name: Check profile status
+      # 11. Check game profile
+      - name: Check game profile
         shell: bash
         run: |
           set -euo pipefail
 
           PROFILE="dm/games/$GAME_TITLE_ID"
 
+          echo "Game Title ID: $GAME_TITLE_ID"
+
           if [ -d "$PROFILE" ]; then
-            echo "Existing Naruto profile found"
+            echo "Existing game profile found:"
             find "$PROFILE" -maxdepth 2 -type f -print
           else
             echo "No Storm Connections profile found."
-            echo "A provisional profile must be generated by NXNative."
+            echo "Build will use the repository's available defaults."
           fi
 
+      # 12. Build IPA and separate RomFS
       - name: Build IPA and separate RomFS
         shell: bash
         run: |
@@ -156,53 +233,151 @@ jobs:
             --keep-extracted \
             --progress lines
 
-          test -s "$IPA_FILE"
+          if [ ! -s "$IPA_FILE" ]; then
+            echo "::error::IPA was not generated"
+            exit 1
+          fi
 
-      - name: Collect outputs
+          echo "IPA generated:"
+          ls -lh "$IPA_FILE"
+
+          df -h "$RUNNER_TEMP"
+
+      # 13. Collect outputs and split large RomFS
+      - name: Collect IPA, profile, logs and RomFS
         if: always()
         shell: bash
         run: |
-          set -u
+          set -euo pipefail
+
           mkdir -p "$OUTPUT_DIR"
 
+          # Collect IPA
           if [ -s "$IPA_FILE" ]; then
-            cp "$IPA_FILE" "$OUTPUT_DIR/"
+            cp "$IPA_FILE" "$OUTPUT_DIR/NarutoStormConnections.ipa"
           fi
 
-          for DIR in logs profile; do
-            if [ -d "$WORK_DIR/$DIR" ]; then
-              mkdir -p "$OUTPUT_DIR/$DIR"
-              cp -R "$WORK_DIR/$DIR/." "$OUTPUT_DIR/$DIR/" || true
-            fi
-          done
-
-          if [ -d "$WORK_DIR/extract" ]; then
-            find "$WORK_DIR/extract" -maxdepth 3 -type f \
-              -name "RomFS.img" \
-              -exec cp {} "$OUTPUT_DIR/" \; || true
+          # Collect generated profile, if available
+          if [ -d "$WORK_DIR/profile" ]; then
+            mkdir -p "$OUTPUT_DIR/profile"
+            cp -R "$WORK_DIR/profile/." "$OUTPUT_DIR/profile/"
           fi
 
+          # Collect repository game profile, if available
+          if [ -d "dm/games/$GAME_TITLE_ID" ]; then
+            mkdir -p "$OUTPUT_DIR/profile/repository-profile"
+            cp -R "dm/games/$GAME_TITLE_ID/." \
+              "$OUTPUT_DIR/profile/repository-profile/"
+          fi
+
+          # Collect logs
+          if [ -d "$WORK_DIR/logs" ]; then
+            mkdir -p "$OUTPUT_DIR/logs"
+            cp -R "$WORK_DIR/logs/." "$OUTPUT_DIR/logs/"
+          fi
+
+          # Collect survey
           if [ -d "$INPUT_DIR/${GAME_TITLE_ID}_survey" ]; then
             cp -R "$INPUT_DIR/${GAME_TITLE_ID}_survey" \
               "$OUTPUT_DIR/survey"
           fi
 
+          # Locate RomFS image
+          ROMFS_FILE=$(find "$WORK_DIR" -type f -name "RomFS.img" -print -quit)
+
+          if [ -z "$ROMFS_FILE" ]; then
+            echo "::error::RomFS.img not found in build directory"
+            exit 1
+          fi
+
+          echo "RomFS located:"
+          ls -lh "$ROMFS_FILE"
+
+          # Delete NSP first to reclaim storage
+          echo "Removing downloaded NSP to reclaim disk space..."
+          rm -f "$INPUT_DIR/NarutoStormConnections.nsp"
+
+          echo "Disk after NSP cleanup:"
+          df -h "$RUNNER_TEMP"
+
+          # Check available disk before creating split copies
+          AVAILABLE_KB=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
+          AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
+
+          echo "Available before split: ${AVAILABLE_GB} GiB"
+
+          if [ "$AVAILABLE_GB" -lt 14 ]; then
+            echo "::error::Need at least 14 GiB free to split the RomFS image."
+            exit 1
+          fi
+
+          # Split RomFS into chunks of 7 GiB
+          split -b 7G -d -a 2 \
+            "$ROMFS_FILE" \
+            "$OUTPUT_DIR/RomFS.part-"
+
+          echo "RomFS split completed:"
+          ls -lh "$OUTPUT_DIR"/RomFS.part-*
+
+          PART_COUNT=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'RomFS.part-*' | wc -l | tr -d ' ')
+
+          if [ "$PART_COUNT" -lt 2 ]; then
+            echo "::error::Expected at least two RomFS parts"
+            exit 1
+          fi
+
+          echo "RomFS parts: $PART_COUNT"
+
+          echo "Final output files:"
           find "$OUTPUT_DIR" -maxdepth 4 -type f -print
 
-      - name: Upload artifacts
+          df -h "$RUNNER_TEMP"
+
+      # 14. Upload IPA, profile, logs and survey
+      - name: Upload IPA, profile and logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: Naruto-Storm-Connections-NXNative-iOS
-          path: ${{ runner.temp }}/naruto-output/
+          name: Naruto-Storm-Connections-IPA-Profile
+          path: |
+            ${{ runner.temp }}/naruto-output/NarutoStormConnections.ipa
+            ${{ runner.temp }}/naruto-output/profile/**
+            ${{ runner.temp }}/naruto-output/logs/**
+            ${{ runner.temp }}/naruto-output/survey/**
           compression-level: 0
           retention-days: 7
           if-no-files-found: warn
 
+      # 15. Upload RomFS part 1
+      - name: Upload RomFS part 1
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Naruto-Storm-Connections-RomFS-1
+          path: ${{ runner.temp }}/naruto-output/RomFS.part-00
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      # 16. Upload RomFS part 2
+      - name: Upload RomFS part 2
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Naruto-Storm-Connections-RomFS-2
+          path: ${{ runner.temp }}/naruto-output/RomFS.part-01
+          compression-level: 0
+          retention-days: 7
+          if-no-files-found: error
+
+      # 17. Cleanup sensitive files
       - name: Cleanup sensitive files
         if: always()
         shell: bash
         run: |
           set +e
+
           rm -f "$KEYS_FILE"
           rm -f "$INPUT_DIR"/*.nsp
+
+          echo "Sensitive files cleanup completed"

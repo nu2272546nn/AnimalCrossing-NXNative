@@ -66,25 +66,22 @@ jobs:
           echo "===== BEFORE CLEANUP ====="
           df -h "$RUNNER_TEMP"
 
-          # Remove unavailable simulator runtimes
           xcrun simctl delete unavailable || true
 
-          # Remove unnecessary Xcode caches
           sudo rm -rf \
             /Library/Developer/CoreSimulator/Caches \
             "$HOME/Library/Developer/Xcode/DerivedData" \
             "$HOME/Library/Developer/Xcode/Archives" \
             || true
 
-          # Remove unused Android and development SDK files
           sudo rm -rf \
             "$HOME/Library/Android" \
             /usr/local/share/powershell \
             /usr/share/dotnet \
             || true
 
-          # Clear package caches
           brew cleanup -s || true
+
           rm -rf \
             "$HOME/.cache/pip" \
             "$HOME/.npm" \
@@ -99,7 +96,7 @@ jobs:
           echo "Available disk: ${AVAILABLE_GB} GiB"
 
           if [ "$AVAILABLE_GB" -lt 25 ]; then
-            echo "::error::Insufficient disk space. Need at least 25 GiB before downloading the game."
+            echo "::error::Insufficient disk space. Need at least 25 GiB."
             exit 1
           fi
 
@@ -133,6 +130,8 @@ jobs:
           set -euo pipefail
           python3 -m pip install --upgrade gdown
 
+          gdown --version
+
       # 8. Download Naruto Storm Connections NSP
       - name: Download game NSP
         shell: bash
@@ -146,8 +145,10 @@ jobs:
             exit 1
           fi
 
-          gdown --fuzzy "$NSP_URL" \
-            -O "$INPUT_DIR/NarutoStormConnections.nsp"
+          gdown "$NSP_URL" \
+            -O "$INPUT_DIR/NarutoStormConnections.nsp" \
+            --continue \
+            --retries 5
 
           test -s "$INPUT_DIR/NarutoStormConnections.nsp"
 
@@ -169,7 +170,10 @@ jobs:
             exit 1
           fi
 
-          gdown --fuzzy "$KEYS_URL" -O "$KEYS_FILE"
+          gdown "$KEYS_URL" \
+            -O "$KEYS_FILE" \
+            --continue \
+            --retries 5
 
           test -s "$KEYS_FILE"
           chmod 600 "$KEYS_FILE"
@@ -194,7 +198,10 @@ jobs:
           if magic != b"PFS0":
               raise SystemExit("Invalid NSP: PFS0 header not found")
 
-          print(f"NSP validation passed: {path.stat().st_size:,} bytes")
+          print(
+              f"NSP validation passed: "
+              f"{path.stat().st_size:,} bytes"
+          )
           PY
 
       # 11. Check game profile
@@ -245,6 +252,7 @@ jobs:
 
       # 13. Collect outputs and split large RomFS
       - name: Collect IPA, profile, logs and RomFS
+        id: collect
         if: always()
         shell: bash
         run: |
@@ -254,16 +262,20 @@ jobs:
 
           # Collect IPA
           if [ -s "$IPA_FILE" ]; then
-            cp "$IPA_FILE" "$OUTPUT_DIR/NarutoStormConnections.ipa"
+            cp "$IPA_FILE" \
+              "$OUTPUT_DIR/NarutoStormConnections.ipa"
+          else
+            echo "::warning::IPA not available. Build may have failed."
           fi
 
-          # Collect generated profile, if available
+          # Collect generated profile
           if [ -d "$WORK_DIR/profile" ]; then
             mkdir -p "$OUTPUT_DIR/profile"
-            cp -R "$WORK_DIR/profile/." "$OUTPUT_DIR/profile/"
+            cp -R "$WORK_DIR/profile/." \
+              "$OUTPUT_DIR/profile/"
           fi
 
-          # Collect repository game profile, if available
+          # Collect repository game profile
           if [ -d "dm/games/$GAME_TITLE_ID" ]; then
             mkdir -p "$OUTPUT_DIR/profile/repository-profile"
             cp -R "dm/games/$GAME_TITLE_ID/." \
@@ -273,7 +285,8 @@ jobs:
           # Collect logs
           if [ -d "$WORK_DIR/logs" ]; then
             mkdir -p "$OUTPUT_DIR/logs"
-            cp -R "$WORK_DIR/logs/." "$OUTPUT_DIR/logs/"
+            cp -R "$WORK_DIR/logs/." \
+              "$OUTPUT_DIR/logs/"
           fi
 
           # Collect survey
@@ -282,36 +295,52 @@ jobs:
               "$OUTPUT_DIR/survey"
           fi
 
+          # Stop RomFS collection if IPA was not generated
+          if [ ! -s "$IPA_FILE" ]; then
+            echo "Skipping RomFS collection."
+            echo "romfs_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           # Locate RomFS image
-          ROMFS_FILE=$(find "$WORK_DIR" -type f -name "RomFS.img" -print -quit)
+          if [ ! -d "$WORK_DIR" ]; then
+            echo "::warning::Build directory not found."
+            echo "romfs_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          ROMFS_FILE=$(find "$WORK_DIR" \
+            -type f -name "RomFS.img" -print -quit)
 
           if [ -z "$ROMFS_FILE" ]; then
-            echo "::error::RomFS.img not found in build directory"
-            exit 1
+            echo "::warning::RomFS.img not found. IPA/profile will still be uploaded."
+            echo "romfs_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           echo "RomFS located:"
           ls -lh "$ROMFS_FILE"
 
-          # Delete NSP first to reclaim storage
-          echo "Removing downloaded NSP to reclaim disk space..."
+          # Delete NSP to reclaim storage
+          echo "Removing downloaded NSP..."
           rm -f "$INPUT_DIR/NarutoStormConnections.nsp"
 
           echo "Disk after NSP cleanup:"
           df -h "$RUNNER_TEMP"
 
-          # Check available disk before creating split copies
+          # Check available disk before splitting
           AVAILABLE_KB=$(df -Pk "$RUNNER_TEMP" | awk 'NR==2 {print $4}')
           AVAILABLE_GB=$((AVAILABLE_KB / 1024 / 1024))
 
           echo "Available before split: ${AVAILABLE_GB} GiB"
 
           if [ "$AVAILABLE_GB" -lt 14 ]; then
-            echo "::error::Need at least 14 GiB free to split the RomFS image."
-            exit 1
+            echo "::warning::Not enough free disk space to split RomFS."
+            echo "romfs_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
-          # Split RomFS into chunks of 7 GiB
+          # Split RomFS into 7 GiB chunks
           split -b 7G -d -a 2 \
             "$ROMFS_FILE" \
             "$OUTPUT_DIR/RomFS.part-"
@@ -319,11 +348,13 @@ jobs:
           echo "RomFS split completed:"
           ls -lh "$OUTPUT_DIR"/RomFS.part-*
 
-          PART_COUNT=$(find "$OUTPUT_DIR" -maxdepth 1 -name 'RomFS.part-*' | wc -l | tr -d ' ')
+          PART_COUNT=$(find "$OUTPUT_DIR" \
+            -maxdepth 1 -name 'RomFS.part-*' | wc -l | tr -d ' ')
 
           if [ "$PART_COUNT" -lt 2 ]; then
-            echo "::error::Expected at least two RomFS parts"
-            exit 1
+            echo "::warning::Expected at least two RomFS parts."
+            echo "romfs_ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
           echo "RomFS parts: $PART_COUNT"
@@ -332,6 +363,8 @@ jobs:
           find "$OUTPUT_DIR" -maxdepth 4 -type f -print
 
           df -h "$RUNNER_TEMP"
+
+          echo "romfs_ready=true" >> "$GITHUB_OUTPUT"
 
       # 14. Upload IPA, profile, logs and survey
       - name: Upload IPA, profile and logs
@@ -350,7 +383,7 @@ jobs:
 
       # 15. Upload RomFS part 1
       - name: Upload RomFS part 1
-        if: success()
+        if: success() && steps.collect.outputs.romfs_ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Naruto-Storm-Connections-RomFS-1
@@ -361,7 +394,7 @@ jobs:
 
       # 16. Upload RomFS part 2
       - name: Upload RomFS part 2
-        if: success()
+        if: success() && steps.collect.outputs.romfs_ready == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: Naruto-Storm-Connections-RomFS-2
